@@ -168,3 +168,168 @@
 - 节表：Section Header Table 编译链接靠节表来定位和访问各个节的属性
 - `readelf -S xxx` 读取节表内容
 - ELF 节表第一个元素是无效的描述符，类型为 NULL
+```
+// An ELF section header.
+
+template<int size>
+struct Shdr_data
+{
+  Elf_Word sh_name;
+  Elf_Word sh_type;
+  typename Elf_types<size>::Elf_WXword sh_flags;
+  typename Elf_types<size>::Elf_Addr sh_addr;
+  typename Elf_types<size>::Elf_Off sh_offset;
+  typename Elf_types<size>::Elf_WXword sh_size;
+  Elf_Word sh_link;
+  Elf_Word sh_info;
+  typename Elf_types<size>::Elf_WXword sh_addralign;
+  typename Elf_types<size>::Elf_WXword sh_entsize;
+};
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| sh_name | section name 节名，是一个字符串，位于一个叫 `.shstrtab` 的字符串表，sh_name 是节名在该表中的偏移 |
+| sh_type | 节的类型 |
+| sh_flags | 节的标志位 |
+| sh_addr | 节虚拟地址，如果该节可以被加载，则sh_addr为该节被加载后在地址空间内的虚拟地址，否则为0 |
+| sh_offset | 节偏移，如果该节在文件中，则表示该节在文件中的偏移，否则无意义 |
+| sh_size | 节的长度 |
+| sh_link 和 sh_info | 节链接信息 |
+| sh_addralign | 节地址对齐。为0或1则没有对齐要求，表示2的N次方地址对齐，例如3为8地址对齐|
+| sh_entsize | 每一项的长度，如果为0表示该节不包含固定大小的项。|
+
+- 节的类型 sh_type  
+节的名字只有在编译和链接过程有意义，但不能表示真正的类型。节的类型 `sh_type` 和 `sh_flags` 决定节的属性。
+- 节的标志位 sh_flags  
+表示该节在进程虚拟地址空间的属性。可读可写可执行
+- 节的链接信息 sh_link, sh_info  
+如果节与链接相关，这两个才有意义，否则其他类型无意义。
+
+#### 重定位表
+- `rel.text` 节，sh_type 为 `SHT_REL`，表明这是一个重定位表。
+- 代码段和数据段绝对地址的引用位置重定位信息，都在重定位表中。
+- `rel.text` 表示是对 `text` 节的重定位表，`rel.data` 是对 `data` 节的重定位表
+- `sh_link` 表示符号表的下标，`sh_info` 表示作用于哪个节，例如：`text` 节的下标为1，则 `sh_info` 为1
+
+#### 字符串表
+- 字符串表：`strtab`，保存普通字符串，例如符号
+- 节表字符串表：`shstrtab`，保存段表中用到的字符串，例如段名
+
+
+### 链接的接口 -- 符号
+
+- 定义：define
+- 引用：reference
+- 目标文件 B 用到了目标文件 A 中的函数，称为 B 引用了 A 的定义
+- 符号：函数和变量的统称，函数名和变量名为符号名
+
+- 符号表：记录目标文件中用到的所有符号
+- 符号值：定义的符号有一个对应的值，即为地址
+- 符号分类：
+    - 本目标文件的全局符号，可以被其他目标文件引用
+    - 外部符号：在本目标文件引用的全局符号，没有定义在本目标文件
+    - 段名：该段起始地址
+    - 局部符号：只在编译单元内部可见
+    - 行号信息：可选
+
+- `nm` 可以查看符号信息
+
+#### ELF 符号表结构
+- `symtab` 文件中的一个段，结构是一个 `Elf_Sym` 数组，每个结构对应一个符号。
+```
+// An ELF symbol table entry.  We use template specialization for the
+// 32-bit and 64-bit versions because the fields are in a different
+// order.
+
+template<int size>
+struct Sym_data;
+
+template<>
+struct Sym_data<32>
+{
+  Elf_Word st_name;
+  Elf_types<32>::Elf_Addr st_value;
+  Elf_Word st_size;
+  unsigned char st_info;
+  unsigned char st_other;
+  Elf_Half st_shndx;
+};
+
+template<>
+struct Sym_data<64>
+{
+  Elf_Word st_name;
+  unsigned char st_info;
+  unsigned char st_other;
+  Elf_Half st_shndx;
+  Elf_types<64>::Elf_Addr st_value;
+  Elf_Xword st_size;
+};
+
+```
+| 名称 | 定义 |
+| --- | --- |
+| st_name | 符号名，包含了该符号名在字符串表中的下标 |
+| st_value | 符号对应的值，可能是一个绝对值，也可能是一个地址 |
+| st_size | 符号大小，应该是对应数据类型的大小，为0表示符号大小为0或者未知 |
+| st_info | 符号类型和绑定信息 |
+| st_other | 目前为0，没用 |
+| st_shndx | 符号所在的段 |
+
+- 符号类型和绑定信息 `st_info`：低 4 位表示符号类型，高 28 位表示符号绑定信息  
+- 绑定信息是局部、全局、弱引用  
+- 符号类型是未知、数据对象、函数、文件名
+- 符号所在段 `st_shndx`：
+    - 如果符号定义在本目标文件，则该成员表示符号所在段的下标
+    - 如果不在目标文件中，则为一些特殊值：`SHN_ABS`绝对的值，`SHN_COMMON`未初始化的全局符号定义，`SHN_UNDEF` 未定义，表示引用。
+
+- 符号值 `st_value`：
+    - 如果符号不是 `COMMOM` 块，则该值就是符号在段中的偏移。
+    - 如果符号是 `COMMON` 块，该值表示对齐属性
+    - 可执行文件中，该值为符号的虚拟地址，对于动态链接有用。
+
+#### 特殊符号
+- 链接器 ld 会定义很多特殊符号
+    - `__executable_start`：该符号为程序起始地址，不是入口地址，是程序的最开始的地址
+    - `__etext/_etext/etext`：代码段结束地址
+    - `_edata/edata`：数据段结束地址
+    - `_end/end`：程序结束地址
+
+#### 符号修饰和函数签名
+- 名称空间 namespace 解决命名冲突问题
+- 符号修饰(name decoration)或符号改编(name mangling)
+- 函数签名：函数信息，包括函数名，参数类型，所在类，名称空间
+- 不同编译器对于同一个函数签名可能对应不同的修饰后名称，所以产生的目标文件可能无法正常相互链接。
+
+#### extern "C"
+- `extern "C" {}` 里的代码可以避免C++的符号修饰
+- 如果需要兼容C和C++，定义的时候可以写
+    ```
+    #ifdef __cplusplus
+    extern "C" {
+    #endif 
+    ...
+
+    #ifdef __cplusplus
+    }
+    #endif 
+    ```
+
+#### 弱符号和强符号
+- 强符号：函数和初始化的全局变量
+- 弱符号：未初始化的全局变量
+- `__attribute__((weak)) xxxx = 2`
+- 规则：
+    - 不允许强符号多次定义
+    - 如果一个符号在一个目标文件是强符号，其他文件中都是弱符号，则选择强符号
+    - 如果一个符号在所有文件都是弱符号，则选择占用空间最大的一个
+
+- 强引用：找不到定义会报错
+- 弱引用：未定义的弱引用不会报错
+
+### 调试信息
+
+- `-g` 加上debug信息
+- `DWARF` 格式(Debug With Arbitrary Record Format)的标准调试信息
+- `strip` 去掉调试信息
